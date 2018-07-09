@@ -2598,6 +2598,126 @@ func TestImportImportUser(t *testing.T) {
 	checkNotifyProp(t, user, model.CHANNEL_MENTIONS_NOTIFY_PROP, "false")
 	checkNotifyProp(t, user, model.COMMENTS_NOTIFY_PROP, model.COMMENTS_NOTIFY_ANY)
 	checkNotifyProp(t, user, model.MENTION_KEYS_NOTIFY_PROP, "misc")
+
+	// Test importing a user with roles set to a team and a channel which are affected by an override scheme.
+	// The import subsystem should translate `channel_admin/channel_user/team_admin/team_user`
+	// to the appropriate scheme-managed-role booleans.
+
+	// Mark the phase 2 permissions migration as completed.
+	<-th.App.Srv.Store.System().Save(&model.System{Name: model.MIGRATION_KEY_ADVANCED_PERMISSIONS_PHASE_2, Value: "true"})
+
+	defer func() {
+		<-th.App.Srv.Store.System().PermanentDeleteByName(model.MIGRATION_KEY_ADVANCED_PERMISSIONS_PHASE_2)
+	}()
+
+	teamSchemeData := &SchemeImportData{
+		Name:        ptrStr(model.NewId()),
+		DisplayName: ptrStr(model.NewId()),
+		Scope:       ptrStr("team"),
+		DefaultTeamUserRole: &RoleImportData{
+			Name:        ptrStr(model.NewId()),
+			DisplayName: ptrStr(model.NewId()),
+		},
+		DefaultTeamAdminRole: &RoleImportData{
+			Name:        ptrStr(model.NewId()),
+			DisplayName: ptrStr(model.NewId()),
+		},
+		DefaultChannelUserRole: &RoleImportData{
+			Name:        ptrStr(model.NewId()),
+			DisplayName: ptrStr(model.NewId()),
+		},
+		DefaultChannelAdminRole: &RoleImportData{
+			Name:        ptrStr(model.NewId()),
+			DisplayName: ptrStr(model.NewId()),
+		},
+		Description: ptrStr("description"),
+	}
+
+	if err := th.App.ImportScheme(teamSchemeData, false); err != nil {
+		t.Fatalf("Should have succeeded.")
+	}
+
+	var teamScheme *model.Scheme
+	if res := <-th.App.Srv.Store.Scheme().GetByName(*teamSchemeData.Name); res.Err != nil {
+		t.Fatalf("Failed to import scheme: %v", res.Err)
+	} else {
+		teamScheme = res.Data.(*model.Scheme)
+	}
+
+	teamData := &TeamImportData{
+		Name:            ptrStr(model.NewId()),
+		DisplayName:     ptrStr("Display Name"),
+		Type:            ptrStr("O"),
+		Description:     ptrStr("The team description."),
+		AllowOpenInvite: ptrBool(true),
+		Scheme:          &teamScheme.Name,
+	}
+	if err := th.App.ImportTeam(teamData, false); err != nil {
+		t.Fatalf("Import should have succeeded: %v", err.Error())
+	}
+	team, err = th.App.GetTeamByName(teamName)
+	if err != nil {
+		t.Fatalf("Failed to get team from database.")
+	}
+
+	channelData := &ChannelImportData{
+		Team:        &teamName,
+		Name:        ptrStr(model.NewId()),
+		DisplayName: ptrStr("Display Name"),
+		Type:        ptrStr("O"),
+		Header:      ptrStr("Channe Header"),
+		Purpose:     ptrStr("Channel Purpose"),
+	}
+	if err := th.App.ImportChannel(channelData, false); err != nil {
+		t.Fatalf("Import should have succeeded.")
+	}
+	channel, err = th.App.GetChannelByName(*channelData.Name, team.Id)
+	if err != nil {
+		t.Fatalf("Failed to get channel from database: %v", err.Error())
+	}
+
+	// Test with a valid team & valid channel name in apply mode.
+	userData := &UserImportData{
+		Username: &username,
+		Email:    ptrStr(model.NewId() + "@example.com"),
+		Teams: &[]UserTeamImportData{
+			{
+				Name:  &team.Name,
+				Roles: ptrStr("team_user team_admin"),
+				Channels: &[]UserChannelImportData{
+					{
+						Name:  &channel.Name,
+						Roles: ptrStr("channel_admin channel_user"),
+					},
+				},
+			},
+		},
+	}
+	if err := th.App.ImportUser(userData, false); err != nil {
+		t.Fatalf("Should have succeeded.")
+	}
+
+	user, err = th.App.GetUserByUsername(*userData.Username)
+	if err != nil {
+		t.Fatalf("Failed to get user from database.")
+	}
+
+	teamMember, err := th.App.GetTeamMember(team.Id, user.Id)
+	if err != nil {
+		t.Fatalf("Failed to get the team member")
+	}
+	assert.True(t, teamMember.SchemeAdmin)
+	assert.True(t, teamMember.SchemeUser)
+	assert.Equal(t, "", teamMember.ExplicitRoles)
+
+	channelMember, err := th.App.GetChannelMember(channel.Id, user.Id)
+	if err != nil {
+		t.Fatalf("Failed to get the channel member")
+	}
+	assert.True(t, channelMember.SchemeAdmin)
+	assert.True(t, channelMember.SchemeUser)
+	assert.Equal(t, "", channelMember.ExplicitRoles)
+
 }
 
 func AssertAllPostsCount(t *testing.T, a *App, initialCount int64, change int64, teamName string) {
@@ -3654,11 +3774,16 @@ func TestImportBulkImport(t *testing.T) {
 	th := Setup()
 	defer th.TearDown()
 
+	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.ServiceSettings.EnableCustomEmoji = true })
+
 	teamName := model.NewId()
 	channelName := model.NewId()
 	username := model.NewId()
 	username2 := model.NewId()
 	username3 := model.NewId()
+	emojiName := model.NewId()
+	testsDir, _ := utils.FindDir("tests")
+	testImage := filepath.Join(testsDir, "test.png")
 
 	// Run bulk import with a valid 1 of everything.
 	data1 := `{"type": "version", "version": 1}
@@ -3671,7 +3796,8 @@ func TestImportBulkImport(t *testing.T) {
 {"type": "direct_channel", "direct_channel": {"members": ["` + username + `", "` + username2 + `"]}}
 {"type": "direct_channel", "direct_channel": {"members": ["` + username + `", "` + username2 + `", "` + username3 + `"]}}
 {"type": "direct_post", "direct_post": {"channel_members": ["` + username + `", "` + username2 + `"], "user": "` + username + `", "message": "Hello Direct Channel", "create_at": 123456789013}}
-{"type": "direct_post", "direct_post": {"channel_members": ["` + username + `", "` + username2 + `", "` + username3 + `"], "user": "` + username + `", "message": "Hello Group Channel", "create_at": 123456789014}}`
+{"type": "direct_post", "direct_post": {"channel_members": ["` + username + `", "` + username2 + `", "` + username3 + `"], "user": "` + username + `", "message": "Hello Group Channel", "create_at": 123456789014}}
+{"type": "emoji", "emoji": {"name": "` + emojiName + `", "image": "` + testImage + `"}}`
 
 	if err, line := th.App.BulkImport(strings.NewReader(data1), false, 2); err != nil || line != 0 {
 		t.Fatalf("BulkImport should have succeeded: %v, %v", err.Error(), line)
@@ -3712,4 +3838,76 @@ func TestImportProcessImportDataFileVersionLine(t *testing.T) {
 	if _, err := processImportDataFileVersionLine(data); err == nil {
 		t.Fatalf("Expected error on invalid version line.")
 	}
+}
+
+func TestImportValidateEmojiImportData(t *testing.T) {
+	data := EmojiImportData{
+		Name:  ptrStr("parrot"),
+		Image: ptrStr("/path/to/image"),
+	}
+
+	err := validateEmojiImportData(&data)
+	assert.Nil(t, err, "Validation should succeed")
+
+	*data.Name = "smiley"
+	err = validateEmojiImportData(&data)
+	assert.NotNil(t, err)
+
+	*data.Name = ""
+	err = validateEmojiImportData(&data)
+	assert.NotNil(t, err)
+
+	*data.Name = ""
+	*data.Image = ""
+	err = validateEmojiImportData(&data)
+	assert.NotNil(t, err)
+
+	*data.Image = "/path/to/image"
+	data.Name = nil
+	err = validateEmojiImportData(&data)
+	assert.NotNil(t, err)
+
+	data.Name = ptrStr("parrot")
+	data.Image = nil
+	err = validateEmojiImportData(&data)
+	assert.NotNil(t, err)
+}
+
+func TestImportImportEmoji(t *testing.T) {
+	th := Setup()
+	defer th.TearDown()
+
+	th.App.UpdateConfig(func(cfg *model.Config) { *cfg.ServiceSettings.EnableCustomEmoji = true })
+
+	testsDir, _ := utils.FindDir("tests")
+	testImage := filepath.Join(testsDir, "test.png")
+
+	data := EmojiImportData{Name: ptrStr(model.NewId())}
+	err := th.App.ImportEmoji(&data, true)
+	assert.NotNil(t, err, "Invalid emoji should have failed dry run")
+
+	result := <-th.App.Srv.Store.Emoji().GetByName(*data.Name)
+	assert.Nil(t, result.Data, "Emoji should not have been imported")
+
+	data.Image = ptrStr(testImage)
+	err = th.App.ImportEmoji(&data, true)
+	assert.Nil(t, err, "Valid emoji should have passed dry run")
+
+	data = EmojiImportData{Name: ptrStr(model.NewId())}
+	err = th.App.ImportEmoji(&data, false)
+	assert.NotNil(t, err, "Invalid emoji should have failed apply mode")
+
+	data.Image = ptrStr("non-existent-file")
+	err = th.App.ImportEmoji(&data, false)
+	assert.NotNil(t, err, "Emoji with bad image file should have failed apply mode")
+
+	data.Image = ptrStr(testImage)
+	err = th.App.ImportEmoji(&data, false)
+	assert.Nil(t, err, "Valid emoji should have succeeded apply mode")
+
+	result = <-th.App.Srv.Store.Emoji().GetByName(*data.Name)
+	assert.NotNil(t, result.Data, "Emoji should have been imported")
+
+	err = th.App.ImportEmoji(&data, false)
+	assert.Nil(t, err, "Second run should have succeeded apply mode")
 }

@@ -87,6 +87,8 @@ const (
 	SERVICE_SETTINGS_DEFAULT_MAX_LOGIN_ATTEMPTS = 10
 	SERVICE_SETTINGS_DEFAULT_ALLOW_CORS_FROM    = ""
 	SERVICE_SETTINGS_DEFAULT_LISTEN_AND_ADDRESS = ":8065"
+	SERVICE_SETTINGS_DEFAULT_GFYCAT_API_KEY     = "2_KtH_W5"
+	SERVICE_SETTINGS_DEFAULT_GFYCAT_API_SECRET  = "3wLVZPiswc3DnaiaFoLkDvB4X0IV6CpMkj4tf2inJRsBY6-FnkT08zGmppWFgeof"
 
 	TEAM_SETTINGS_DEFAULT_MAX_USERS_PER_TEAM       = 50
 	TEAM_SETTINGS_DEFAULT_CUSTOM_BRAND_TEXT        = ""
@@ -210,6 +212,9 @@ type ServiceSettings struct {
 	WebserverMode                                     *string
 	EnableCustomEmoji                                 *bool
 	EnableEmojiPicker                                 *bool
+	EnableGifPicker                                   *bool
+	GfycatApiKey                                      *string
+	GfycatApiSecret                                   *string
 	RestrictCustomEmojiCreation                       *string
 	RestrictPostDelete                                *string
 	AllowEditPost                                     *string
@@ -413,6 +418,18 @@ func (s *ServiceSettings) SetDefaults() {
 		s.EnableEmojiPicker = NewBool(true)
 	}
 
+	if s.EnableGifPicker == nil {
+		s.EnableGifPicker = NewBool(false)
+	}
+
+	if s.GfycatApiKey == nil || *s.GfycatApiKey == "" {
+		s.GfycatApiKey = NewString(SERVICE_SETTINGS_DEFAULT_GFYCAT_API_KEY)
+	}
+
+	if s.GfycatApiSecret == nil || *s.GfycatApiSecret == "" {
+		s.GfycatApiSecret = NewString(SERVICE_SETTINGS_DEFAULT_GFYCAT_API_SECRET)
+	}
+
 	if s.RestrictCustomEmojiCreation == nil {
 		s.RestrictCustomEmojiCreation = NewString(RESTRICT_EMOJI_CREATION_ALL)
 	}
@@ -590,15 +607,16 @@ type SSOSettings struct {
 }
 
 type SqlSettings struct {
-	DriverName               *string
-	DataSource               *string
-	DataSourceReplicas       []string
-	DataSourceSearchReplicas []string
-	MaxIdleConns             *int
-	MaxOpenConns             *int
-	Trace                    bool
-	AtRestEncryptKey         string
-	QueryTimeout             *int
+	DriverName                  *string
+	DataSource                  *string
+	DataSourceReplicas          []string
+	DataSourceSearchReplicas    []string
+	MaxIdleConns                *int
+	ConnMaxLifetimeMilliseconds *int
+	MaxOpenConns                *int
+	Trace                       bool
+	AtRestEncryptKey            string
+	QueryTimeout                *int
 }
 
 func (s *SqlSettings) SetDefaults() {
@@ -620,6 +638,10 @@ func (s *SqlSettings) SetDefaults() {
 
 	if s.MaxOpenConns == nil {
 		s.MaxOpenConns = NewInt(300)
+	}
+
+	if s.ConnMaxLifetimeMilliseconds == nil {
+		s.ConnMaxLifetimeMilliseconds = NewInt(3600000)
 	}
 
 	if s.QueryTimeout == nil {
@@ -752,8 +774,8 @@ func (s *FileSettings) SetDefaults() {
 	}
 
 	if s.InitialFont == "" {
-		// Defaults to "luximbi.ttf"
-		s.InitialFont = "luximbi.ttf"
+		// Defaults to "nunito-bold.ttf"
+		s.InitialFont = "nunito-bold.ttf"
 	}
 
 	if s.Directory == "" {
@@ -2052,6 +2074,10 @@ func (ss *SqlSettings) isValid() *AppError {
 
 	if *ss.MaxIdleConns <= 0 {
 		return NewAppError("Config.IsValid", "model.config.is_valid.sql_idle.app_error", nil, "", http.StatusBadRequest)
+	}
+
+	if *ss.ConnMaxLifetimeMilliseconds < 0 {
+		return NewAppError("Config.IsValid", "model.config.is_valid.sql_conn_max_lifetime_milliseconds.app_error", nil, "", http.StatusBadRequest)
 	}
 
 	if *ss.QueryTimeout <= 0 {

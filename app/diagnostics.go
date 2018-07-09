@@ -208,6 +208,9 @@ func (a *App) trackConfig() {
 		"enable_user_access_tokens":                               *cfg.ServiceSettings.EnableUserAccessTokens,
 		"enable_custom_emoji":                                     *cfg.ServiceSettings.EnableCustomEmoji,
 		"enable_emoji_picker":                                     *cfg.ServiceSettings.EnableEmojiPicker,
+		"enable_gif_picker":                                       *cfg.ServiceSettings.EnableGifPicker,
+		"gfycat_api_key":                                          isDefault(*cfg.ServiceSettings.GfycatApiKey, model.SERVICE_SETTINGS_DEFAULT_GFYCAT_API_KEY),
+		"gfycat_api_secret":                                       isDefault(*cfg.ServiceSettings.GfycatApiSecret, model.SERVICE_SETTINGS_DEFAULT_GFYCAT_API_SECRET),
 		"experimental_enable_authentication_transfer":             *cfg.ServiceSettings.ExperimentalEnableAuthenticationTransfer,
 		"restrict_custom_emoji_creation":                          *cfg.ServiceSettings.RestrictCustomEmojiCreation,
 		"enable_testing":                                          cfg.ServiceSettings.EnableTesting,
@@ -297,13 +300,14 @@ func (a *App) trackConfig() {
 	})
 
 	a.SendDiagnostic(TRACK_CONFIG_SQL, map[string]interface{}{
-		"driver_name":                 *cfg.SqlSettings.DriverName,
-		"trace":                       cfg.SqlSettings.Trace,
-		"max_idle_conns":              *cfg.SqlSettings.MaxIdleConns,
-		"max_open_conns":              *cfg.SqlSettings.MaxOpenConns,
-		"data_source_replicas":        len(cfg.SqlSettings.DataSourceReplicas),
-		"data_source_search_replicas": len(cfg.SqlSettings.DataSourceSearchReplicas),
-		"query_timeout":               *cfg.SqlSettings.QueryTimeout,
+		"driver_name":                    *cfg.SqlSettings.DriverName,
+		"trace":                          cfg.SqlSettings.Trace,
+		"max_idle_conns":                 *cfg.SqlSettings.MaxIdleConns,
+		"conn_max_lifetime_milliseconds": *cfg.SqlSettings.ConnMaxLifetimeMilliseconds,
+		"max_open_conns":                 *cfg.SqlSettings.MaxOpenConns,
+		"data_source_replicas":           len(cfg.SqlSettings.DataSourceReplicas),
+		"data_source_search_replicas":    len(cfg.SqlSettings.DataSourceSearchReplicas),
+		"query_timeout":                  *cfg.SqlSettings.QueryTimeout,
 	})
 
 	a.SendDiagnostic(TRACK_CONFIG_LOG, map[string]interface{}{

@@ -28,7 +28,6 @@ import (
 const (
 	INDEX_TYPE_FULL_TEXT = "full_text"
 	INDEX_TYPE_DEFAULT   = "default"
-	MAX_DB_CONN_LIFETIME = 60
 	DB_PING_ATTEMPTS     = 18
 	DB_PING_TIMEOUT_SECS = 10
 )
@@ -105,6 +104,7 @@ type SqlSupplier struct {
 	searchReplicas []*gorp.DbMap
 	oldStores      SqlSupplierOldStores
 	settings       *model.SqlSettings
+	lockedToMaster bool
 }
 
 func NewSqlSupplier(settings model.SqlSettings, metrics einterfaces.MetricsInterface) *SqlSupplier {
@@ -217,7 +217,7 @@ func setupConnection(con_type string, dataSource string, settings *model.SqlSett
 
 	db.SetMaxIdleConns(*settings.MaxIdleConns)
 	db.SetMaxOpenConns(*settings.MaxOpenConns)
-	db.SetConnMaxLifetime(time.Duration(MAX_DB_CONN_LIFETIME) * time.Minute)
+	db.SetConnMaxLifetime(time.Duration(*settings.ConnMaxLifetimeMilliseconds) * time.Millisecond)
 
 	var dbmap *gorp.DbMap
 
@@ -283,7 +283,7 @@ func (ss *SqlSupplier) GetSearchReplica() *gorp.DbMap {
 }
 
 func (ss *SqlSupplier) GetReplica() *gorp.DbMap {
-	if len(ss.settings.DataSourceReplicas) == 0 {
+	if len(ss.settings.DataSourceReplicas) == 0 || ss.lockedToMaster {
 		return ss.GetMaster()
 	}
 
@@ -799,6 +799,14 @@ func (ss *SqlSupplier) Close() {
 	for _, replica := range ss.replicas {
 		replica.Db.Close()
 	}
+}
+
+func (ss *SqlSupplier) LockToMaster() {
+	ss.lockedToMaster = true
+}
+
+func (ss *SqlSupplier) UnlockFromMaster() {
+	ss.lockedToMaster = false
 }
 
 func (ss *SqlSupplier) Team() store.TeamStore {

@@ -33,6 +33,7 @@ type LineImportData struct {
 	Post          *PostImportData          `json:"post"`
 	DirectChannel *DirectChannelImportData `json:"direct_channel"`
 	DirectPost    *DirectPostImportData    `json:"direct_post"`
+	Emoji         *EmojiImportData         `json:"emoji"`
 	Version       *int                     `json:"version"`
 }
 
@@ -112,6 +113,11 @@ type UserChannelNotifyPropsImportData struct {
 	Desktop    *string `json:"desktop"`
 	Mobile     *string `json:"mobile"`
 	MarkUnread *string `json:"mark_unread"`
+}
+
+type EmojiImportData struct {
+	Name  *string `json:"name"`
+	Image *string `json:"image"`
 }
 
 type ReactionImportData struct {
@@ -208,6 +214,9 @@ func (a *App) bulkImportWorker(dryRun bool, wg *sync.WaitGroup, lines <-chan Lin
 func (a *App) BulkImport(fileReader io.Reader, dryRun bool, workers int) (*model.AppError, int) {
 	scanner := bufio.NewScanner(fileReader)
 	lineNumber := 0
+
+	a.Srv.Store.LockToMaster()
+	defer a.Srv.Store.UnlockFromMaster()
 
 	errorsChan := make(chan LineImportWorkerError, (2*workers)+1) // size chosen to ensure it never gets filled up completely.
 	var wg sync.WaitGroup
@@ -333,6 +342,12 @@ func (a *App) ImportLine(line LineImportData, dryRun bool) *model.AppError {
 			return model.NewAppError("BulkImport", "app.import.import_line.null_direct_post.error", nil, "", http.StatusBadRequest)
 		} else {
 			return a.ImportDirectPost(line.DirectPost, dryRun)
+		}
+	case line.Type == "emoji":
+		if line.Emoji == nil {
+			return model.NewAppError("BulkImport", "app.import.import_line.null_emoji.error", nil, "", http.StatusBadRequest)
+		} else {
+			return a.ImportEmoji(line.Emoji, dryRun)
 		}
 	default:
 		return model.NewAppError("BulkImport", "app.import.import_line.unknown_line_type.error", map[string]interface{}{"Type": line.Type}, "", http.StatusBadRequest)
@@ -1059,10 +1074,24 @@ func (a *App) ImportUserTeams(user *model.User, data *[]UserTeamImportData) *mod
 		}
 
 		var roles string
+		isSchemeUser := true
+		isSchemeAdmin := false
+
 		if tdata.Roles == nil {
-			roles = model.TEAM_USER_ROLE_ID
+			isSchemeUser = true
 		} else {
-			roles = *tdata.Roles
+			rawRoles := *tdata.Roles
+			explicitRoles := []string{}
+			for _, role := range strings.Fields(rawRoles) {
+				if role == model.TEAM_USER_ROLE_ID {
+					isSchemeUser = true
+				} else if role == model.TEAM_ADMIN_ROLE_ID {
+					isSchemeAdmin = true
+				} else {
+					explicitRoles = append(explicitRoles, role)
+				}
+			}
+			roles = strings.Join(explicitRoles, " ")
 		}
 
 		var member *model.TeamMember
@@ -1070,10 +1099,14 @@ func (a *App) ImportUserTeams(user *model.User, data *[]UserTeamImportData) *mod
 			return err
 		}
 
-		if member.Roles != roles {
+		if member.ExplicitRoles != roles {
 			if _, err := a.UpdateTeamMemberRoles(team.Id, user.Id, roles); err != nil {
 				return err
 			}
+		}
+
+		if member.SchemeAdmin != isSchemeAdmin || member.SchemeUser != isSchemeUser {
+			a.UpdateTeamMemberSchemeRoles(team.Id, user.Id, isSchemeUser, isSchemeAdmin)
 		}
 
 		if defaultChannel, err := a.GetChannelByName(model.DEFAULT_CHANNEL, team.Id); err != nil {
@@ -1105,10 +1138,24 @@ func (a *App) ImportUserChannels(user *model.User, team *model.Team, teamMember 
 		}
 
 		var roles string
+		isSchemeUser := true
+		isSchemeAdmin := false
+
 		if cdata.Roles == nil {
-			roles = model.CHANNEL_USER_ROLE_ID
+			isSchemeUser = true
 		} else {
-			roles = *cdata.Roles
+			rawRoles := *cdata.Roles
+			explicitRoles := []string{}
+			for _, role := range strings.Fields(rawRoles) {
+				if role == model.CHANNEL_USER_ROLE_ID {
+					isSchemeUser = true
+				} else if role == model.CHANNEL_ADMIN_ROLE_ID {
+					isSchemeAdmin = true
+				} else {
+					explicitRoles = append(explicitRoles, role)
+				}
+			}
+			roles = strings.Join(explicitRoles, " ")
 		}
 
 		var member *model.ChannelMember
@@ -1120,10 +1167,14 @@ func (a *App) ImportUserChannels(user *model.User, team *model.Team, teamMember 
 			}
 		}
 
-		if member.Roles != roles {
+		if member.ExplicitRoles != roles {
 			if _, err := a.UpdateChannelMemberRoles(channel.Id, user.Id, roles); err != nil {
 				return err
 			}
+		}
+
+		if member.SchemeAdmin != isSchemeAdmin || member.SchemeUser != isSchemeUser {
+			a.UpdateChannelMemberSchemeRoles(channel.Id, user.Id, isSchemeUser, isSchemeAdmin)
 		}
 
 		if cdata.NotifyProps != nil {
@@ -1197,7 +1248,7 @@ func validateUserImportData(data *UserImportData) *model.AppError {
 	}
 
 	if data.Password != nil && len(*data.Password) == 0 {
-		return model.NewAppError("BulkImport", "app.import.validate_user_import_data.pasword_length.error", nil, "", http.StatusBadRequest)
+		return model.NewAppError("BulkImport", "app.import.validate_user_import_data.password_length.error", nil, "", http.StatusBadRequest)
 	}
 
 	if data.Password != nil && len(*data.Password) > model.USER_PASSWORD_MAX_LENGTH {
@@ -1881,6 +1932,71 @@ func validateDirectPostImportData(data *DirectPostImportData, maxPostSize int) *
 		for _, reply := range *data.Replies {
 			validateReplyImportData(&reply, *data.CreateAt, maxPostSize)
 		}
+	}
+
+	return nil
+}
+
+func (a *App) ImportEmoji(data *EmojiImportData, dryRun bool) *model.AppError {
+	if err := validateEmojiImportData(data); err != nil {
+		return err
+	}
+
+	// If this is a Dry Run, do not continue any further.
+	if dryRun {
+		return nil
+	}
+
+	var emoji *model.Emoji
+	var err *model.AppError
+
+	emoji, err = a.GetEmojiByName(*data.Name)
+	if err != nil && err.StatusCode != http.StatusNotFound {
+		return err
+	}
+
+	alreadyExists := emoji != nil
+
+	if !alreadyExists {
+		emoji = &model.Emoji{
+			Name: *data.Name,
+		}
+		emoji.PreSave()
+	}
+
+	file, fileErr := os.Open(*data.Image)
+	if fileErr != nil {
+		return model.NewAppError("BulkImport", "app.import.emoji.bad_file.error", map[string]interface{}{"EmojiName": *data.Name}, "", http.StatusBadRequest)
+	}
+
+	if _, err := a.WriteFile(file, getEmojiImagePath(emoji.Id)); err != nil {
+		return err
+	}
+
+	if !alreadyExists {
+		if result := <-a.Srv.Store.Emoji().Save(emoji); result.Err != nil {
+			return result.Err
+		}
+	}
+
+	return nil
+}
+
+func validateEmojiImportData(data *EmojiImportData) *model.AppError {
+	if data == nil {
+		return model.NewAppError("BulkImport", "app.import.validate_emoji_import_data.empty.error", nil, "", http.StatusBadRequest)
+	}
+
+	if data.Name == nil || len(*data.Name) == 0 {
+		return model.NewAppError("BulkImport", "app.import.validate_emoji_import_data.name_missing.error", nil, "", http.StatusBadRequest)
+	}
+
+	if err := model.IsValidEmojiName(*data.Name); err != nil {
+		return err
+	}
+
+	if data.Image == nil || len(*data.Image) == 0 {
+		return model.NewAppError("BulkImport", "app.import.validate_emoji_import_data.image_missing.error", nil, "", http.StatusBadRequest)
 	}
 
 	return nil
